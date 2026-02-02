@@ -1,0 +1,491 @@
+#+TITLE: TRAMP Workshop: Agentic Isolation with Emacs
+#+SUBTITLE: Multi-hop access to FreeBSD Bastille jails for AI agent workflows
+#+AUTHOR: Jason Walsh
+#+DATE: 2026-02-01
+#+OPTIONS: toc:3 num:t
+
+* Introduction
+
+This workshop covers using Emacs TRAMP to navigate a multi-host
+architecture where AI coding agents run inside isolated FreeBSD jails.
+The operator never leaves Emacs -- editing files, running tests, tracking
+issues, and switching between agent sandboxes all happen through TRAMP's
+multi-hop protocol.
+
+** The Topology
+
+#+begin_src mermaid
+graph LR
+    laptop["Operator Laptop<br/>(Emacs)"]
+    restricted["Restricted Host<br/>(nexus)"]
+    sandbox["Sandbox Host<br/>(hydra)"]
+
+    subgraph Jails["Bastille Jails"]
+        j1["agent-aygp<br/>10.0.0.10"]
+        j2["agent-dsp<br/>10.0.0.11"]
+        j3["agent-a<br/>10.0.0.20"]
+        j4["agent-b<br/>10.0.0.21"]
+        j5["agent-dsp-dr<br/>10.0.0.30"]
+    end
+
+    laptop -->|"SSH / TRAMP"| restricted
+    restricted -->|"SSH"| sandbox
+    sandbox --- j1
+    sandbox --- j2
+    sandbox --- j3
+    sandbox --- j4
+    sandbox --- j5
+
+    style restricted fill:#2d5016,color:#fff
+    style sandbox fill:#8b1a1a,color:#fff
+#+end_src
+
+** TRAMP Hops
+
+| Hop | From | To | Method |
+|-----+------+----+--------|
+| 1 | Laptop | Restricted host | =/ssh:operator@nexus:= |
+| 2 | Restricted | Sandbox host | =/ssh:jwalsh@hydra.lan:= |
+| 3 | Sandbox | Jail | =/bastille:agent-alpha:= |
+
+With =tramp-default-proxies-alist=, hops 2+3 collapse into a single
+TRAMP path: =/bastille:agent-alpha:/root/project/=.
+
+* Part 1: TRAMP Fundamentals
+
+** What TRAMP Does
+
+TRAMP (Transparent Remote Access, Multiple Protocols) makes remote
+files look local to Emacs. Every Emacs command that operates on files
+-- =find-file=, =dired=, =compile=, =shell=, =vc-diff= -- works
+transparently on TRAMP paths.
+
+** Path Syntax
+
+#+begin_example
+/METHOD:USER@HOST:/path/to/file
+/ssh:jwalsh@hydra.lan:/etc/pf.conf
+#+end_example
+
+** Multi-Hop Syntax
+
+Chain hops with =|=:
+
+#+begin_example
+/ssh:jwalsh@hydra.lan|sudo:root@hydra.lan:/etc/pf.conf
+#+end_example
+
+** Built-in Methods
+
+| Method | Program | Use Case |
+|--------+---------+----------|
+| =ssh= | =ssh= | Remote hosts |
+| =sudo= | =sudo= | Privilege escalation |
+| =su= | =su= | User switching |
+| =docker= | =docker exec= | Docker containers |
+| =podman= | =podman exec= | Podman containers |
+| =kubernetes= | =kubectl exec= | K8s pods |
+| =toolbox= | =toolbox run= | Fedora Toolbox |
+| =nspawn= | =machinectl= | systemd-nspawn |
+
+** What's Missing: FreeBSD Jails
+
+TRAMP's =tramp-container.el= covers Docker, Podman, Kubernetes,
+Toolbox, Distrobox, Flatpak, Apptainer, and systemd-nspawn -- but
+*not* FreeBSD jails. This workshop fills that gap.
+
+* Part 2: The Bastille TRAMP Method
+
+** How Container Methods Work
+
+Every TRAMP container method follows the same pattern from
+=tramp-container.el=:
+
+1. Register a method name and login program in =tramp-methods=
+2. Provide a completion function for tab-completing container names
+3. Optionally register as multi-hop capable
+
+For example, Docker:
+
+#+begin_src emacs-lisp :eval no
+(add-to-list 'tramp-methods
+  `("docker"
+    (tramp-login-program "docker")
+    (tramp-login-args (("exec") ("-it") ("-u" "%u") ("%h") ("%l")))
+    (tramp-remote-shell "/bin/sh")
+    (tramp-remote-shell-args ("-i" "-c"))))
+#+end_src
+
+Where =%h= is the container name and =%l= is the login shell.
+
+** Bastille Method Definition
+
+Bastille jails are accessed via =sudo bastille console <jail>=:
+
+#+begin_src emacs-lisp :eval no
+(add-to-list 'tramp-methods
+  '("bastille"
+    (tramp-login-program "sudo")
+    (tramp-login-args (("bastille") ("console") ("%h")))
+    (tramp-remote-shell "/bin/sh")
+    (tramp-remote-shell-args ("-i" "-c"))
+    (tramp-completion-use-cache nil)))
+#+end_src
+
+Key differences from Docker:
+- Login program is =sudo=, not =bastille= (we need privilege escalation)
+- =bastille console= gives an interactive shell (like =docker exec -it=)
+- No =-u= flag -- jails always enter as root (scoped to the jail)
+
+** Alternative: jexec Method
+
+For environments without Bastille, use FreeBSD's native =jexec(8)=:
+
+#+begin_src emacs-lisp :eval no
+(add-to-list 'tramp-methods
+  '("jexec"
+    (tramp-login-program "sudo")
+    (tramp-login-args (("jexec") ("%h") ("/bin/sh")))
+    (tramp-remote-shell "/bin/sh")
+    (tramp-remote-shell-args ("-i" "-c"))))
+#+end_src
+
+** Jail Name Completion
+
+Tab-completion for jail names, modeled on =tramp-container--completion-function=:
+
+#+begin_src emacs-lisp :eval no
+(defun tramp-bastille--completion-function (_method)
+  "List Bastille jails available for connection."
+  (when-let* ((raw-list
+               (shell-command-to-string "sudo bastille list 2>/dev/null"))
+              (lines (split-string raw-list "\n" 'omit-nulls))
+              (names (seq-filter
+                      (lambda (name)
+                        (and name (not (string= name "Hostname"))))
+                      (mapcar (lambda (line) (nth 3 (split-string line)))
+                              (cdr lines)))))
+    (mapcar (lambda (name) (list nil name)) names)))
+#+end_src
+
+* Part 3: Multi-Hop Proxy Configuration
+
+** The Problem
+
+Without proxy configuration, accessing a jail requires the full multi-hop path:
+
+#+begin_example
+/ssh:jwalsh@hydra.lan|bastille:agent-dsp-dr:/root/.bashrc
+#+end_example
+
+That's unwieldy. We want:
+
+#+begin_example
+/bastille:agent-dsp-dr:/root/.bashrc
+#+end_example
+
+** tramp-default-proxies-alist
+
+This variable maps patterns to proxy hops. Any TRAMP path matching the
+pattern automatically gets the proxy prepended:
+
+#+begin_src emacs-lisp :eval no
+;; Any host matching "agent-.*" auto-routes through hydra.lan
+(add-to-list 'tramp-default-proxies-alist
+             '("agent-.*" nil "/ssh:jwalsh@hydra.lan:"))
+#+end_src
+
+Now =/bastille:agent-dsp-dr:/root/= expands internally to:
+=/ssh:jwalsh@hydra.lan|bastille:agent-dsp-dr:/root/=
+
+** Three-Hop Example (Laptop -> Restricted -> Sandbox -> Jail)
+
+If the operator works on a laptop that SSHs to a restricted host, which
+then SSHs to the sandbox host:
+
+#+begin_src emacs-lisp :eval no
+;; Hop 1: sandbox host routes through restricted host
+(add-to-list 'tramp-default-proxies-alist
+             '("hydra\\.lan" nil "/ssh:jwalsh@nexus:"))
+
+;; Hop 2: jails route through sandbox host
+(add-to-list 'tramp-default-proxies-alist
+             '("agent-.*" nil "/ssh:jwalsh@hydra.lan:"))
+#+end_src
+
+Now from the laptop:
+#+begin_example
+C-x C-f /bastille:agent-dsp-dr:/root/project/
+#+end_example
+
+TRAMP internally resolves: laptop -> nexus -> hydra.lan -> jail.
+
+** Passwordless sudo Requirement
+
+The =bastille= method calls =sudo bastille console=. For non-interactive
+use, configure passwordless sudo on the sandbox host:
+
+#+begin_src conf
+# /usr/local/etc/sudoers.d/bastille
+jwalsh ALL=(root) NOPASSWD: /usr/local/bin/bastille console *
+jwalsh ALL=(root) NOPASSWD: /usr/local/bin/bastille cmd *
+jwalsh ALL=(root) NOPASSWD: /usr/local/bin/bastille list
+jwalsh ALL=(root) NOPASSWD: /usr/sbin/jexec
+jwalsh ALL=(root) NOPASSWD: /usr/sbin/jls
+#+end_src
+
+** SSH ControlMaster (Performance)
+
+Multi-hop TRAMP benefits from SSH connection multiplexing:
+
+#+begin_src conf
+# ~/.ssh/config
+Host hydra.lan
+    User jwalsh
+    IdentityFile ~/.ssh/id_ed25519
+    ControlMaster auto
+    ControlPath ~/.ssh/cm-%r@%h:%p
+    ControlPersist 10m
+    ForwardAgent no
+#+end_src
+
+** FreeBSD Performance Fix
+
+#+begin_src emacs-lisp :eval no
+;; Required on FreeBSD to avoid process-send-string bug
+(setq tramp-chunksize 500)
+#+end_src
+
+* Part 4: Agentic Workflows
+
+** Why Jails for AI Agents?
+
+AI coding agents need filesystem, git, network, and build tool access.
+Giving that access on a shared machine creates security risks:
+
+| Risk | Without Jail | With Jail |
+|------+--------------+-----------|
+| Read credentials | All =~/.ssh=, =~/.config= | Only scoped jail credentials |
+| Delete files | Entire home dir | Only jail's ZFS dataset (5G quota) |
+| Network access | Unrestricted | pf egress: ports 22/80/443 only |
+| See other sessions | All processes | Only jail's ~5 processes |
+| Lateral movement | SSH anywhere | Cannot reach restricted host |
+
+** Standard Agent Toolchain
+
+Every jail needs:
+
+| Tool | Purpose |
+|------+---------|
+| bash | Required shell for Claude Code |
+| git, gh, ghq | Forge operations |
+| bd (beads) | Git-backed issue tracking |
+| node, npm | Claude Code runtime |
+| gmake | GNU Make (BSD make breaks most Makefiles) |
+| curl | HTTP client |
+
+** Emacs as Agent Control Plane
+
+The operator uses Emacs as the control plane for multiple agents:
+
+#+begin_src mermaid
+graph TB
+    emacs["Emacs<br/>(operator)"]
+
+    subgraph bastille["TRAMP bastille: method"]
+        a1["/bastille:agent-aygp:/"]
+        a2["/bastille:agent-dsp-dr:/"]
+        a3["/bastille:agent-a:/"]
+    end
+
+    emacs -->|"jail-find-file"| a1
+    emacs -->|"jail-shell"| a2
+    emacs -->|"jail-compile"| a3
+
+    a1 -->|"gh api (aygp-dr)"| forge1["GitHub: aygp-dr"]
+    a2 -->|"gh api (dsp-dr)"| forge2["GitHub: dsp-dr"]
+    a3 -->|"gh api (mock)"| forge3["GitHub: mock"]
+#+end_src
+
+** Workflow: Review Agent Work
+
+#+begin_src emacs-lisp :eval no
+;; 1. Check what work is available
+(jail-beads-ready "agent-dsp-dr")
+
+;; 2. Open the project
+(jail-dired "agent-dsp-dr" "/root/ghq/github.com/dsp-dr/guile-sage/")
+
+;; 3. Edit files -- TRAMP makes them look local
+;;    Syntax highlighting, indentation, completion all work
+
+;; 4. Run tests inside the jail
+(jail-compile "agent-dsp-dr" "gmake check")
+
+;; 5. Review git status
+(jail-shell "agent-dsp-dr")
+;; In shell: git diff && bd close <id> && bd sync && git push
+#+end_src
+
+** Workflow: Compare Agents Side-by-Side
+
+#+begin_src emacs-lisp :eval no
+;; Open same config file in two jails
+(find-file "/bastille:agent-a:/root/.bashrc")
+(split-window-right)
+(find-file "/bastille:agent-b:/root/.bashrc")
+;; Both are isolated -- different filesystems, different credentials
+#+end_src
+
+** Workflow: Emergency Rollback
+
+If an agent corrupts its filesystem, rollback via ZFS:
+
+#+begin_src sh
+# From the sandbox host (via jail-shell or SSH)
+sudo bastille stop agent-dsp-dr
+sudo zfs rollback zroot/bastille/jails/agent-dsp-dr/root@pre-task
+sudo bastille start agent-dsp-dr
+#+end_src
+
+Then re-open the TRAMP path -- Emacs picks up the rolled-back state.
+
+* Part 5: Exercises
+
+** Exercise 1: Setup
+
+Load =tramp-bastille.el= and configure the proxy:
+
+#+begin_src emacs-lisp :eval no
+(load-file "/path/to/tramp-bastille.el")
+(load-file "/path/to/tramp-bastille-workshop.el")
+(jail-configure-proxy "hydra.lan" "jwalsh")
+#+end_src
+
+Verify: =C-x C-f /bastille:= then press =TAB= -- jail names should complete.
+
+** Exercise 2: File Access
+
+Open =/root/.bashrc= in =agent-dsp-dr=:
+
+#+begin_example
+C-x C-f /bastille:agent-dsp-dr:/root/.bashrc
+#+end_example
+
+Check that the file loads. Edit something. Save. Verify the change
+persists by re-opening.
+
+** Exercise 3: Identity Verification
+
+Open a shell in two different jails:
+
+#+begin_example
+M-x jail-shell -> agent-aygp
+  (run: gh api user --jq '.login')
+
+M-x jail-shell -> agent-dsp-dr
+  (run: gh api user --jq '.login')
+#+end_example
+
+The identities should be different -- each jail has scoped credentials.
+
+** Exercise 4: Compile and Navigate
+
+In =agent-dsp-dr=, clone a project and run tests:
+
+#+begin_example
+M-x jail-shell -> agent-dsp-dr
+  (run: ghq get https://github.com/dsp-dr/guile-sage)
+
+M-x jail-compile -> agent-dsp-dr -> "gmake -C /root/ghq/github.com/dsp-dr/guile-sage check"
+#+end_example
+
+Click on error lines in =*compilation*= -- TRAMP should open the file
+at the correct line inside the jail.
+
+** Exercise 5: Beads Integration
+
+Track work from inside a jail:
+
+#+begin_example
+M-x jail-shell -> agent-dsp-dr
+  bd ready
+  bd create --title="Workshop test issue" --type=task --priority=3
+  bd list --status=open
+  bd close <id>
+  bd sync
+#+end_example
+
+** Exercise 6: Cross-Jail Isolation
+
+Verify jails can't see each other:
+
+#+begin_example
+M-x jail-shell -> agent-a
+  ls /root/           # agent-a's files
+  ps aux              # ~5 processes
+  ls /home            # empty
+
+M-x jail-shell -> agent-b
+  ls /root/           # different files
+  ps aux              # different ~5 processes
+#+end_example
+
+* Part 6: Reference
+
+** Complete Init Configuration
+
+#+begin_src emacs-lisp :eval no
+;; ~/.emacs.d/init.el or relevant config file
+
+(with-eval-after-load 'tramp
+  ;; FreeBSD performance fix
+  (setq tramp-chunksize 500)
+
+  ;; Load jail methods
+  (require 'tramp-bastille)
+
+  ;; Auto-proxy: jail names route through sandbox
+  (add-to-list 'tramp-default-proxies-alist
+               '("agent-.*" nil "/ssh:jwalsh@hydra.lan:"))
+
+  ;; Load workshop helpers
+  (require 'tramp-bastille-workshop)
+
+  ;; Keybindings (optional)
+  (global-set-key (kbd "C-c j f") #'jail-find-file)
+  (global-set-key (kbd "C-c j s") #'jail-shell)
+  (global-set-key (kbd "C-c j c") #'jail-compile)
+  (global-set-key (kbd "C-c j d") #'jail-dired)
+  (global-set-key (kbd "C-c j b") #'jail-beads-ready)
+  (global-set-key (kbd "C-c j D") #'jail-dashboard))
+#+end_src
+
+** TRAMP Path Quick Reference
+
+| What | Path |
+|------+------|
+| File in jail | =/bastille:agent-dsp-dr:/root/project/file.py= |
+| Dired in jail | =/bastille:agent-dsp-dr:/root/ghq/= |
+| Host file (as user) | =/ssh:jwalsh@hydra.lan:/etc/pf.conf= |
+| Host file (as root) | =/ssh:jwalsh@hydra.lan\vert{}sudo:root@hydra.lan:/etc/pf.conf= |
+| Explicit multi-hop | =/ssh:jwalsh@hydra.lan\vert{}bastille:agent-a:/root/= |
+
+** Troubleshooting
+
+| Problem | Fix |
+|---------+-----|
+| Connection hangs | =M-x tramp-cleanup-all-connections= |
+| Sudo password prompt | Add passwordless sudo rules (see Part 3) |
+| Slow file operations | Check =tramp-chunksize= is 500, enable ControlMaster |
+| Debug output | =(setq tramp-verbose 6)= then check =*Messages*= |
+| Stale connections | =M-x tramp-cleanup-connection= for specific host |
+
+* References
+
+- [[https://git.savannah.gnu.org/git/tramp.git][TRAMP source (Savannah)]]
+- [[https://www.gnu.org/software/tramp/][TRAMP Manual]]
+- [[https://www.gnu.org/software/emacs/manual/html_node/tramp/Multi_002dhops.html][TRAMP Multi-hops]]
+- [[https://github.com/BastilleBSD/bastille][BastilleBSD]]
+- [[https://github.com/steveyegge/beads][Beads Issue Tracker]]
+- [[https://wal.sh/research/2026-agent-isolation-freebsd-jails.html][Agent Isolation with FreeBSD Jails (companion paper)]]
