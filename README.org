@@ -17,15 +17,13 @@ multi-hop protocol.
 #+begin_src mermaid
 graph LR
     laptop["Operator Laptop<br/>(Emacs)"]
-    restricted["Restricted Host<br/>(nexus)"]
-    sandbox["Sandbox Host<br/>(hydra)"]
+    restricted["Restricted Host"]
+    sandbox["Sandbox Host"]
 
     subgraph Jails["Bastille Jails"]
-        j1["agent-aygp<br/>10.0.0.10"]
-        j2["agent-dsp<br/>10.0.0.11"]
-        j3["agent-a<br/>10.0.0.20"]
-        j4["agent-b<br/>10.0.0.21"]
-        j5["agent-dsp-dr<br/>10.0.0.30"]
+        j1["agent-alpha<br/>10.0.0.10"]
+        j2["agent-bravo<br/>10.0.0.11"]
+        j3["agent-charlie<br/>10.0.0.20"]
     end
 
     laptop -->|"SSH / TRAMP"| restricted
@@ -33,8 +31,6 @@ graph LR
     sandbox --- j1
     sandbox --- j2
     sandbox --- j3
-    sandbox --- j4
-    sandbox --- j5
 
     style restricted fill:#2d5016,color:#fff
     style sandbox fill:#8b1a1a,color:#fff
@@ -44,8 +40,8 @@ graph LR
 
 | Hop | From | To | Method |
 |-----+------+----+--------|
-| 1 | Laptop | Restricted host | =/ssh:operator@nexus:= |
-| 2 | Restricted | Sandbox host | =/ssh:jwalsh@hydra.lan:= |
+| 1 | Laptop | Restricted host | =/ssh:operator@restricted:= |
+| 2 | Restricted | Sandbox host | =/ssh:operator@sandbox:= |
 | 3 | Sandbox | Jail | =/bastille:agent-alpha:= |
 
 With =tramp-default-proxies-alist=, hops 2+3 collapse into a single
@@ -64,7 +60,7 @@ transparently on TRAMP paths.
 
 #+begin_example
 /METHOD:USER@HOST:/path/to/file
-/ssh:jwalsh@hydra.lan:/etc/pf.conf
+/ssh:operator@sandbox:/etc/pf.conf
 #+end_example
 
 ** Multi-Hop Syntax
@@ -72,7 +68,7 @@ transparently on TRAMP paths.
 Chain hops with =|=:
 
 #+begin_example
-/ssh:jwalsh@hydra.lan|sudo:root@hydra.lan:/etc/pf.conf
+/ssh:operator@sandbox|sudo:root@sandbox:/etc/pf.conf
 #+end_example
 
 ** Built-in Methods
@@ -175,13 +171,13 @@ Tab-completion for jail names, modeled on =tramp-container--completion-function=
 Without proxy configuration, accessing a jail requires the full multi-hop path:
 
 #+begin_example
-/ssh:jwalsh@hydra.lan|bastille:agent-dsp-dr:/root/.bashrc
+/ssh:operator@sandbox|bastille:agent-alpha:/root/.bashrc
 #+end_example
 
 That's unwieldy. We want:
 
 #+begin_example
-/bastille:agent-dsp-dr:/root/.bashrc
+/bastille:agent-alpha:/root/.bashrc
 #+end_example
 
 ** tramp-default-proxies-alist
@@ -190,13 +186,13 @@ This variable maps patterns to proxy hops. Any TRAMP path matching the
 pattern automatically gets the proxy prepended:
 
 #+begin_src emacs-lisp :eval no
-;; Any host matching "agent-.*" auto-routes through hydra.lan
+;; Any host matching "agent-.*" auto-routes through sandbox
 (add-to-list 'tramp-default-proxies-alist
-             '("agent-.*" nil "/ssh:jwalsh@hydra.lan:"))
+             '("agent-.*" nil "/ssh:operator@sandbox:"))
 #+end_src
 
-Now =/bastille:agent-dsp-dr:/root/= expands internally to:
-=/ssh:jwalsh@hydra.lan|bastille:agent-dsp-dr:/root/=
+Now =/bastille:agent-alpha:/root/= expands internally to:
+=/ssh:operator@sandbox|bastille:agent-alpha:/root/=
 
 ** Three-Hop Example (Laptop -> Restricted -> Sandbox -> Jail)
 
@@ -204,21 +200,21 @@ If the operator works on a laptop that SSHs to a restricted host, which
 then SSHs to the sandbox host:
 
 #+begin_src emacs-lisp :eval no
-;; Hop 1: sandbox host routes through restricted host
+;; Hop 1: sandbox routes through restricted host
 (add-to-list 'tramp-default-proxies-alist
-             '("hydra\\.lan" nil "/ssh:jwalsh@nexus:"))
+             '("sandbox" nil "/ssh:operator@restricted:"))
 
 ;; Hop 2: jails route through sandbox host
 (add-to-list 'tramp-default-proxies-alist
-             '("agent-.*" nil "/ssh:jwalsh@hydra.lan:"))
+             '("agent-.*" nil "/ssh:operator@sandbox:"))
 #+end_src
 
 Now from the laptop:
 #+begin_example
-C-x C-f /bastille:agent-dsp-dr:/root/project/
+C-x C-f /bastille:agent-alpha:/root/project/
 #+end_example
 
-TRAMP internally resolves: laptop -> nexus -> hydra.lan -> jail.
+TRAMP internally resolves: laptop -> restricted -> sandbox -> jail.
 
 ** Passwordless sudo Requirement
 
@@ -227,11 +223,11 @@ use, configure passwordless sudo on the sandbox host:
 
 #+begin_src conf
 # /usr/local/etc/sudoers.d/bastille
-jwalsh ALL=(root) NOPASSWD: /usr/local/bin/bastille console *
-jwalsh ALL=(root) NOPASSWD: /usr/local/bin/bastille cmd *
-jwalsh ALL=(root) NOPASSWD: /usr/local/bin/bastille list
-jwalsh ALL=(root) NOPASSWD: /usr/sbin/jexec
-jwalsh ALL=(root) NOPASSWD: /usr/sbin/jls
+operator ALL=(root) NOPASSWD: /usr/local/bin/bastille console *
+operator ALL=(root) NOPASSWD: /usr/local/bin/bastille cmd *
+operator ALL=(root) NOPASSWD: /usr/local/bin/bastille list
+operator ALL=(root) NOPASSWD: /usr/sbin/jexec
+operator ALL=(root) NOPASSWD: /usr/sbin/jls
 #+end_src
 
 ** SSH ControlMaster (Performance)
@@ -240,8 +236,9 @@ Multi-hop TRAMP benefits from SSH connection multiplexing:
 
 #+begin_src conf
 # ~/.ssh/config
-Host hydra.lan
-    User jwalsh
+Host sandbox
+    HostName 10.0.0.2
+    User operator
     IdentityFile ~/.ssh/id_ed25519
     ControlMaster auto
     ControlPath ~/.ssh/cm-%r@%h:%p
@@ -267,7 +264,7 @@ Giving that access on a shared machine creates security risks:
 |------+--------------+-----------|
 | Read credentials | All =~/.ssh=, =~/.config= | Only scoped jail credentials |
 | Delete files | Entire home dir | Only jail's ZFS dataset (5G quota) |
-| Network access | Unrestricted | pf egress: ports 22/80/443 only |
+| Network access | Unrestricted | pf egress: ports 22/443 only |
 | See other sessions | All processes | Only jail's ~5 processes |
 | Lateral movement | SSH anywhere | Cannot reach restricted host |
 
@@ -293,37 +290,37 @@ graph TB
     emacs["Emacs<br/>(operator)"]
 
     subgraph bastille["TRAMP bastille: method"]
-        a1["/bastille:agent-aygp:/"]
-        a2["/bastille:agent-dsp-dr:/"]
-        a3["/bastille:agent-a:/"]
+        a1["/bastille:agent-alpha:/"]
+        a2["/bastille:agent-bravo:/"]
+        a3["/bastille:agent-charlie:/"]
     end
 
     emacs -->|"jail-find-file"| a1
     emacs -->|"jail-shell"| a2
     emacs -->|"jail-compile"| a3
 
-    a1 -->|"gh api (aygp-dr)"| forge1["GitHub: aygp-dr"]
-    a2 -->|"gh api (dsp-dr)"| forge2["GitHub: dsp-dr"]
-    a3 -->|"gh api (mock)"| forge3["GitHub: mock"]
+    a1 -->|"gh api (identity-A)"| forge1["Forge: Org A"]
+    a2 -->|"gh api (identity-B)"| forge2["Forge: Org B"]
+    a3 -->|"gh api (identity-C)"| forge3["Forge: Org C"]
 #+end_src
 
 ** Workflow: Review Agent Work
 
 #+begin_src emacs-lisp :eval no
 ;; 1. Check what work is available
-(jail-beads-ready "agent-dsp-dr")
+(jail-beads-ready "agent-alpha")
 
 ;; 2. Open the project
-(jail-dired "agent-dsp-dr" "/root/ghq/github.com/dsp-dr/guile-sage/")
+(jail-dired "agent-alpha" "/root/ghq/forge.example/org/project/")
 
 ;; 3. Edit files -- TRAMP makes them look local
 ;;    Syntax highlighting, indentation, completion all work
 
 ;; 4. Run tests inside the jail
-(jail-compile "agent-dsp-dr" "gmake check")
+(jail-compile "agent-alpha" "gmake check")
 
 ;; 5. Review git status
-(jail-shell "agent-dsp-dr")
+(jail-shell "agent-alpha")
 ;; In shell: git diff && bd close <id> && bd sync && git push
 #+end_src
 
@@ -331,9 +328,9 @@ graph TB
 
 #+begin_src emacs-lisp :eval no
 ;; Open same config file in two jails
-(find-file "/bastille:agent-a:/root/.bashrc")
+(find-file "/bastille:agent-alpha:/root/.bashrc")
 (split-window-right)
-(find-file "/bastille:agent-b:/root/.bashrc")
+(find-file "/bastille:agent-bravo:/root/.bashrc")
 ;; Both are isolated -- different filesystems, different credentials
 #+end_src
 
@@ -343,9 +340,9 @@ If an agent corrupts its filesystem, rollback via ZFS:
 
 #+begin_src sh
 # From the sandbox host (via jail-shell or SSH)
-sudo bastille stop agent-dsp-dr
-sudo zfs rollback zroot/bastille/jails/agent-dsp-dr/root@pre-task
-sudo bastille start agent-dsp-dr
+sudo bastille stop agent-alpha
+sudo zfs rollback zroot/bastille/jails/agent-alpha/root@pre-task
+sudo bastille start agent-alpha
 #+end_src
 
 Then re-open the TRAMP path -- Emacs picks up the rolled-back state.
@@ -359,17 +356,17 @@ Load =tramp-bastille.el= and configure the proxy:
 #+begin_src emacs-lisp :eval no
 (load-file "/path/to/tramp-bastille.el")
 (load-file "/path/to/tramp-bastille-workshop.el")
-(jail-configure-proxy "hydra.lan" "jwalsh")
+(jail-configure-proxy "sandbox" "operator")
 #+end_src
 
 Verify: =C-x C-f /bastille:= then press =TAB= -- jail names should complete.
 
 ** Exercise 2: File Access
 
-Open =/root/.bashrc= in =agent-dsp-dr=:
+Open =/root/.bashrc= in =agent-alpha=:
 
 #+begin_example
-C-x C-f /bastille:agent-dsp-dr:/root/.bashrc
+C-x C-f /bastille:agent-alpha:/root/.bashrc
 #+end_example
 
 Check that the file loads. Edit something. Save. Verify the change
@@ -380,10 +377,10 @@ persists by re-opening.
 Open a shell in two different jails:
 
 #+begin_example
-M-x jail-shell -> agent-aygp
+M-x jail-shell -> agent-alpha
   (run: gh api user --jq '.login')
 
-M-x jail-shell -> agent-dsp-dr
+M-x jail-shell -> agent-bravo
   (run: gh api user --jq '.login')
 #+end_example
 
@@ -391,13 +388,13 @@ The identities should be different -- each jail has scoped credentials.
 
 ** Exercise 4: Compile and Navigate
 
-In =agent-dsp-dr=, clone a project and run tests:
+In =agent-alpha=, clone a project and run tests:
 
 #+begin_example
-M-x jail-shell -> agent-dsp-dr
-  (run: ghq get https://github.com/dsp-dr/guile-sage)
+M-x jail-shell -> agent-alpha
+  (run: ghq get https://forge.example/org/project)
 
-M-x jail-compile -> agent-dsp-dr -> "gmake -C /root/ghq/github.com/dsp-dr/guile-sage check"
+M-x jail-compile -> agent-alpha -> "gmake -C /root/ghq/forge.example/org/project check"
 #+end_example
 
 Click on error lines in =*compilation*= -- TRAMP should open the file
@@ -408,7 +405,7 @@ at the correct line inside the jail.
 Track work from inside a jail:
 
 #+begin_example
-M-x jail-shell -> agent-dsp-dr
+M-x jail-shell -> agent-alpha
   bd ready
   bd create --title="Workshop test issue" --type=task --priority=3
   bd list --status=open
@@ -421,12 +418,12 @@ M-x jail-shell -> agent-dsp-dr
 Verify jails can't see each other:
 
 #+begin_example
-M-x jail-shell -> agent-a
-  ls /root/           # agent-a's files
+M-x jail-shell -> agent-alpha
+  ls /root/           # agent-alpha's files
   ps aux              # ~5 processes
   ls /home            # empty
 
-M-x jail-shell -> agent-b
+M-x jail-shell -> agent-bravo
   ls /root/           # different files
   ps aux              # different ~5 processes
 #+end_example
@@ -447,7 +444,7 @@ M-x jail-shell -> agent-b
 
   ;; Auto-proxy: jail names route through sandbox
   (add-to-list 'tramp-default-proxies-alist
-               '("agent-.*" nil "/ssh:jwalsh@hydra.lan:"))
+               '("agent-.*" nil "/ssh:operator@sandbox:"))
 
   ;; Load workshop helpers
   (require 'tramp-bastille-workshop)
@@ -465,11 +462,11 @@ M-x jail-shell -> agent-b
 
 | What | Path |
 |------+------|
-| File in jail | =/bastille:agent-dsp-dr:/root/project/file.py= |
-| Dired in jail | =/bastille:agent-dsp-dr:/root/ghq/= |
-| Host file (as user) | =/ssh:jwalsh@hydra.lan:/etc/pf.conf= |
-| Host file (as root) | =/ssh:jwalsh@hydra.lan\vert{}sudo:root@hydra.lan:/etc/pf.conf= |
-| Explicit multi-hop | =/ssh:jwalsh@hydra.lan\vert{}bastille:agent-a:/root/= |
+| File in jail | =/bastille:agent-alpha:/root/project/file.py= |
+| Dired in jail | =/bastille:agent-alpha:/root/ghq/= |
+| Host file (as user) | =/ssh:operator@sandbox:/etc/pf.conf= |
+| Host file (as root) | =/ssh:operator@sandbox\vert{}sudo:root@sandbox:/etc/pf.conf= |
+| Explicit multi-hop | =/ssh:operator@sandbox\vert{}bastille:agent-alpha:/root/= |
 
 ** Troubleshooting
 
