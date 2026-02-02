@@ -164,7 +164,220 @@ Tab-completion for jail names, modeled on =tramp-container--completion-function=
     (mapcar (lambda (name) (list nil name)) names)))
 #+end_src
 
-* Part 3: Multi-Hop Proxy Configuration
+* Part 3: Beyond Jails -- ECS and Kubernetes
+
+The same TRAMP method pattern works for any container runtime that
+provides an =exec= or =console= command. This section shows how to
+apply it to AWS ECS Exec and Kubernetes, alongside the Bastille method.
+
+** AWS ECS Exec Method
+
+AWS ECS supports =execute-command= for interactive access to Fargate
+and EC2 tasks. This requires the AWS CLI v2 with the Session Manager
+plugin installed.
+
+#+begin_src emacs-lisp :eval no
+(add-to-list 'tramp-methods
+  '("ecs"
+    (tramp-login-program "aws")
+    (tramp-login-args (("ecs") ("execute-command")
+                       ("--interactive")
+                       ("--command" "%l")
+                       ("--task" "%h")
+                       ("--cluster" "%u")))
+    (tramp-remote-shell "/bin/sh")
+    (tramp-remote-shell-args ("-i" "-c"))
+    (tramp-completion-use-cache nil)))
+#+end_src
+
+The TRAMP =user= field (=%u=) maps to the ECS cluster name, and =host=
+(=%h=) maps to the task ID:
+
+#+begin_example
+;; Open a file inside an ECS task
+C-x C-f /ecs:my-cluster@abc123def456:/app/config.yml
+
+;; Dired inside a Fargate container
+C-x d /ecs:production@task-id-here:/var/log/
+
+;; Multi-hop: SSH to bastion, then ECS exec
+C-x C-f /ssh:admin@bastion|ecs:staging@abc123:/app/src/main.py
+#+end_example
+
+With proxy auto-routing:
+
+#+begin_src emacs-lisp :eval no
+;; ECS tasks auto-route through a bastion host
+(add-to-list 'tramp-default-proxies-alist
+             '(".*" "production" "/ssh:admin@bastion:"))
+#+end_src
+
+*** ECS Exec Prerequisites
+
+- AWS CLI v2 with =aws ecs execute-command= support
+- [[https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html][Session Manager plugin]] installed locally
+- ECS task must have =enableExecuteCommand: true= in the task/service definition
+- IAM permissions: =ecs:ExecuteCommand= on the task
+
+*** Container Selection
+
+If the task has multiple containers, specify with =--container=. To
+handle this, create a wrapper or use =tramp-extra-expand-args=:
+
+#+begin_src sh
+# Wrapper script: /usr/local/bin/ecs-exec
+#!/bin/sh
+# Usage: ecs-exec CLUSTER TASK [CONTAINER]
+CLUSTER="$1"; TASK="$2"; CONTAINER="${3:-}"
+ARGS="--cluster $CLUSTER --task $TASK --interactive --command /bin/sh"
+[ -n "$CONTAINER" ] && ARGS="$ARGS --container $CONTAINER"
+exec aws ecs execute-command $ARGS
+#+end_src
+
+** Kubernetes (Built-in)
+
+TRAMP already includes a =kubernetes= method via =tramp-container.el=.
+For reference, the path syntax is:
+
+#+begin_example
+;; Basic: connect to a pod
+C-x C-f /kubernetes:POD:/path/to/file
+
+;; With namespace
+C-x C-f /kubernetes:POD%NAMESPACE:/path/to/file
+
+;; With specific container in the pod
+C-x C-f /kubernetes:CONTAINER.POD%NAMESPACE:/path/to/file
+#+end_example
+
+Concrete examples:
+
+#+begin_example
+;; Edit nginx config in a pod
+C-x C-f /kubernetes:web-frontend-7b8d6:/etc/nginx/nginx.conf
+
+;; Dired in a staging pod
+C-x d /kubernetes:api-server-abc12%staging:/app/
+
+;; Specific container in a multi-container pod
+C-x C-f /kubernetes:sidecar.api-server-abc12%staging:/var/log/app.log
+#+end_example
+
+*** Multi-Hop: Bastion -> Kubernetes
+
+If your cluster isn't directly accessible (private API server), route
+through a bastion:
+
+#+begin_src emacs-lisp :eval no
+;; k8s pods auto-route through bastion that has kubectl access
+(add-to-list 'tramp-default-proxies-alist
+             '(".*" nil "/ssh:admin@k8s-bastion:"))
+#+end_src
+
+#+begin_example
+;; This auto-routes: laptop -> bastion -> kubectl exec -> pod
+C-x C-f /kubernetes:web-frontend-7b8d6%production:/app/config.yml
+#+end_example
+
+*** Context and Namespace Defaults
+
+#+begin_src emacs-lisp :eval no
+;; Use a specific kubectl context
+(setq tramp-kubernetes-context "production-cluster")
+
+;; Default namespace
+(setq tramp-kubernetes-namespace "default")
+#+end_src
+
+** GCP: Cloud Run Jobs and Compute Engine
+
+Google Cloud provides =gcloud compute ssh= for VMs and =gcloud run jobs
+execute= for Cloud Run. For interactive container access, GCP's closest
+analog to ECS Exec is =gcloud compute ssh= with =--container= for GKE,
+or using the built-in =kubernetes= method directly since GKE is standard
+Kubernetes.
+
+*** GKE (Google Kubernetes Engine)
+
+GKE is standard Kubernetes, so the built-in =kubernetes= method works
+directly after configuring =kubectl=:
+
+#+begin_src sh
+# Configure kubectl for your GKE cluster
+gcloud container clusters get-credentials CLUSTER_NAME \
+    --zone us-central1-a --project my-project
+#+end_src
+
+Then use the standard kubernetes TRAMP path:
+
+#+begin_example
+C-x C-f /kubernetes:my-pod%my-namespace:/app/config.yml
+#+end_example
+
+*** Compute Engine VMs
+
+For GCE VMs, use a custom method that wraps =gcloud compute ssh=:
+
+#+begin_src emacs-lisp :eval no
+(add-to-list 'tramp-methods
+  '("gce"
+    (tramp-login-program "gcloud")
+    (tramp-login-args (("compute") ("ssh")
+                       ("--quiet")
+                       ("--zone" "%u")     ; zone as "user"
+                       ("%h")              ; instance name as "host"
+                       ("--command" "%l")))
+    (tramp-remote-shell "/bin/sh")
+    (tramp-remote-shell-args ("-i" "-c"))
+    (tramp-completion-use-cache nil)))
+#+end_src
+
+#+begin_example
+;; Open file on a GCE instance (zone as user, instance as host)
+C-x C-f /gce:us-central1-a@my-instance:/etc/nginx/nginx.conf
+
+;; Dired on a GCE instance
+C-x d /gce:us-east1-b@sandbox-vm:/home/operator/
+#+end_example
+
+*** Cloud Shell
+
+For quick access to GCP Cloud Shell:
+
+#+begin_src emacs-lisp :eval no
+(add-to-list 'tramp-methods
+  '("gcloud-shell"
+    (tramp-login-program "gcloud")
+    (tramp-login-args (("cloud-shell") ("ssh")
+                       ("--command" "%l")))
+    (tramp-remote-shell "/bin/bash")
+    (tramp-remote-shell-args ("-i" "-c"))
+    (tramp-completion-use-cache nil)))
+#+end_src
+
+#+begin_example
+C-x C-f /gcloud-shell::/home/user/project/main.py
+#+end_example
+
+** Comparison: Container TRAMP Methods
+
+| Method | Program | Path Syntax | Use Case |
+|--------+---------+-------------+----------|
+| =bastille= | =sudo bastille console= | =/bastille:JAIL:/path= | FreeBSD jails |
+| =jexec= | =sudo jexec= | =/jexec:JAIL:/path= | FreeBSD jails (no Bastille) |
+| =ecs= | =aws ecs execute-command= | =/ecs:CLUSTER@TASK:/path= | AWS ECS Fargate/EC2 |
+| =gce= | =gcloud compute ssh= | =/gce:ZONE@INSTANCE:/path= | GCP Compute Engine |
+| =kubernetes= | =kubectl exec= | =/kubernetes:POD%NS:/path= | Kubernetes / GKE / EKS |
+| =docker= | =docker exec= | =/docker:CONTAINER:/path= | Local Docker |
+| =podman= | =podman exec= | =/podman:CONTAINER:/path= | Local Podman |
+| =nspawn= | =machinectl shell= | =/nspawn:CONTAINER:/path= | systemd-nspawn |
+
+All follow the same pattern: =tramp-login-program= + =tramp-login-args=
+with =%h= for container/jail name and =%l= for login shell. The only
+differences are the specific CLI invocation and how identity (user,
+cluster, namespace) maps to TRAMP's =%u=, =%h=, =%a= placeholders.
+
+* Part 4: Multi-Hop Proxy Configuration (All Methods)
 
 ** The Problem
 
@@ -253,7 +466,7 @@ Host sandbox
 (setq tramp-chunksize 500)
 #+end_src
 
-* Part 4: Agentic Workflows
+* Part 5: Agentic Workflows
 
 ** Why Jails for AI Agents?
 
@@ -347,7 +560,7 @@ sudo bastille start agent-alpha
 
 Then re-open the TRAMP path -- Emacs picks up the rolled-back state.
 
-* Part 5: Exercises
+* Part 6: Exercises
 
 ** Exercise 1: Setup
 
@@ -428,7 +641,7 @@ M-x jail-shell -> agent-bravo
   ps aux              # different ~5 processes
 #+end_example
 
-* Part 6: Reference
+* Part 7: Reference
 
 ** Complete Init Configuration
 

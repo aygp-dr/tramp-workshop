@@ -136,5 +136,36 @@ see its function help for a description of the format."
  tramp-jexec-method
  '((tramp-jexec--completion-function "")))
 
+;;; --- AWS ECS Exec Method ---
+
+;; ECS Exec uses `aws ecs execute-command' to shell into Fargate/EC2 tasks.
+;; Requires: aws CLI v2 with Session Manager plugin installed.
+;; The %h placeholder is CLUSTER.TASK (dot-separated).
+
+;;;###autoload
+(defconst tramp-ecs-method "ecs"
+  "TRAMP method name to connect to AWS ECS containers via execute-command.")
+
+(add-to-list 'tramp-methods
+  '("ecs"
+    (tramp-login-program "aws")
+    (tramp-login-args (("ecs") ("execute-command")
+                       ("--interactive")
+                       ("--command" "%l")
+                       ("--task" "%h")
+                       ("--cluster" "%u")))
+    (tramp-remote-shell "/bin/sh")
+    (tramp-remote-shell-args ("-i" "-c"))
+    (tramp-completion-use-cache nil)))
+
+;; Usage:
+;;   /ecs:CLUSTER@TASK-ID:/path/to/file
+;;
+;; Example:
+;;   /ecs:my-cluster@abc123def456:/app/config.yml
+;;
+;; With proxy (SSM through bastion):
+;;   /ssh:bastion|ecs:my-cluster@abc123:/app/config.yml
+
 (provide 'tramp-bastille)
 ;;; tramp-bastille.el ends here
