@@ -1,4 +1,4 @@
-.PHONY: lint test test-pbt test-pty test-all clean
+.PHONY: lint test test-pbt test-pty test-transport test-all clean
 
 EMACS ?= emacs
 
@@ -39,8 +39,16 @@ test-pty:
 		-l tramp-pty-test.el \
 		-f ert-run-tests-batch-and-exit
 
+# Alternative transport tests (serial, ggwave, UDP, mDNS)
+test-transport:
+	$(EMACS) -Q --batch \
+		-L . \
+		-l ert \
+		-l tramp-transport-test.el \
+		-f ert-run-tests-batch-and-exit
+
 # Run all tests
-test-all: test test-pbt test-pty
+test-all: test test-pbt test-pty test-transport
 
 clean:
 	rm -f *.elc
