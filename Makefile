@@ -1,4 +1,4 @@
-.PHONY: lint test clean
+.PHONY: lint test test-pbt test-all clean
 
 EMACS ?= emacs
 
@@ -21,6 +21,18 @@ test:
 		--eval '(cl-assert (assoc "bastille" tramp-methods))' \
 		--eval '(cl-assert (assoc "jexec" tramp-methods))' \
 		--eval '(message "All assertions passed")'
+
+# Property-based tests for parsing functions
+test-pbt:
+	$(EMACS) -Q --batch \
+		-L . \
+		-l ert \
+		-l tramp-bastille.el \
+		-l tramp-bastille-test.el \
+		-f ert-run-tests-batch-and-exit
+
+# Run all tests
+test-all: test test-pbt
 
 clean:
 	rm -f *.elc

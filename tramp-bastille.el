@@ -100,6 +100,18 @@
 ;; Enable multi-hop completion for bastille method
 (add-to-list 'tramp-completion-multi-hop-methods tramp-bastille-method)
 
+(defun tramp-bastille--parse-jail-name (line)
+  "Extract jail name from a LINE of `bastille list' output.
+Returns the jail name string, or nil if LINE is invalid.
+Format: JID  Name  Boot  Prio  State  Type  IP  Ports  Release  Tags"
+  (when-let* ((fields (split-string line nil 'omit-nulls))
+              ;; Need at least JID and Name columns
+              ((>= (length fields) 2))
+              (name (nth 1 fields))
+              ;; Filter out header row
+              ((not (string= name "Name"))))
+    name))
+
 (defun tramp-bastille--completion-function (_method)
   "List Bastille jails available for connection.
 
@@ -108,14 +120,9 @@ see its function help for a description of the format."
   (when-let* ((raw-list
                (shell-command-to-string "sudo bastille list 2>/dev/null"))
               (lines (split-string raw-list "\n" 'omit-nulls))
-              ;; bastille list output: JID  State  IP  Hostname  Path
-              ;; Skip the header line, extract jail names (column 4 = hostname)
               (names (seq-filter
-                      (lambda (name)
-                        (and name (not (string= name "Hostname"))))
-                      (mapcar (lambda (line)
-                                (nth 3 (split-string line)))
-                              (cdr lines)))))
+                      #'identity
+                      (mapcar #'tramp-bastille--parse-jail-name lines))))
     (mapcar (lambda (name) (list nil name)) names)))
 
 (defun tramp-jexec--completion-function (_method)
