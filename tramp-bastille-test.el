@@ -182,5 +182,99 @@ This was the original bug where '99' was returned instead of jail names."
             (should (null (car pair)))
             (should (stringp (cadr pair)))))))))
 
+;;; --- Multi-Runtime Parsing Tests ---
+;;
+;; These tests demonstrate PBT patterns applicable to parsing output from
+;; various container runtimes (Docker, Podman, Kubernetes, jls, etc.)
+
+(defun pbt--generate-docker-ps-line (container-name)
+  "Generate a docker ps output line for CONTAINER-NAME."
+  (let ((id (pbt--random-string 12 "0123456789abcdef"))
+        (image (format "%s:%s"
+                       (pbt--random-string 8)
+                       (nth (random 3) '("latest" "v1.0" "alpine"))))
+        (command (format "\"/bin/sh -c '%s'\"" (pbt--random-string 10)))
+        (created (nth (random 4) '("2 hours ago" "3 days ago" "5 minutes ago" "About an hour ago")))
+        (status (nth (random 3) '("Up 2 hours" "Exited (0) 3 days ago" "Up 5 minutes")))
+        (ports "")
+        (names container-name))
+    (format "%-12s   %-20s   %-30s   %-15s   %-25s   %-10s   %s"
+            id image command created status ports names)))
+
+(defun pbt--generate-kubectl-pods-line (pod-name)
+  "Generate a kubectl get pods output line for POD-NAME."
+  (let ((ready (format "%d/%d" (random 3) (1+ (random 3))))
+        (status (nth (random 4) '("Running" "Pending" "Completed" "CrashLoopBackOff")))
+        (restarts (number-to-string (random 10)))
+        (age (nth (random 4) '("2d" "5h30m" "10m" "3d12h"))))
+    (format "%-40s   %-5s   %-20s   %-3s   %s"
+            pod-name ready status restarts age)))
+
+(defun pbt--parse-docker-container-name (line)
+  "Parse container name from docker ps output LINE.
+Returns name or nil."
+  (when-let* ((fields (split-string line nil 'omit-nulls))
+              ((>= (length fields) 7))
+              (name (car (last fields)))
+              ((not (string= name "NAMES"))))
+    name))
+
+(defun pbt--parse-kubectl-pod-name (line)
+  "Parse pod name from kubectl get pods output LINE.
+Returns name or nil."
+  (when-let* ((fields (split-string line nil 'omit-nulls))
+              ((>= (length fields) 5))
+              (name (car fields))
+              ((not (string= name "NAME"))))
+    name))
+
+(ert-deftest pbt-docker-parse-extracts-name ()
+  "Property: docker ps line parsing extracts container name."
+  (dotimes (_ 50)
+    (let* ((expected (concat "container-" (pbt--random-string 8)))
+           (line (pbt--generate-docker-ps-line expected))
+           (parsed (pbt--parse-docker-container-name line)))
+      (should (equal parsed expected)))))
+
+(ert-deftest pbt-kubectl-parse-extracts-name ()
+  "Property: kubectl get pods line parsing extracts pod name."
+  (dotimes (_ 50)
+    (let* ((expected (concat "pod-" (pbt--random-string 8) "-" (pbt--random-string 5)))
+           (line (pbt--generate-kubectl-pods-line expected))
+           (parsed (pbt--parse-kubectl-pod-name line)))
+      (should (equal parsed expected)))))
+
+(ert-deftest pbt-docker-header-returns-nil ()
+  "Property: docker ps header line returns nil."
+  (let ((header "CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES"))
+    (should (null (pbt--parse-docker-container-name header)))))
+
+(ert-deftest pbt-kubectl-header-returns-nil ()
+  "Property: kubectl get pods header line returns nil."
+  (let ((header "NAME   READY   STATUS   RESTARTS   AGE"))
+    (should (null (pbt--parse-kubectl-pod-name header)))))
+
+;;; --- Consistency Property: All Parsers Return String|Nil ---
+
+(ert-deftest pbt-all-parsers-return-string-or-nil ()
+  "Property: all container name parsers return string or nil, never throw."
+  (let ((test-inputs '(""
+                       "   "
+                       "single"
+                       "1 2"
+                       "a b c d e f g h i j k l m"
+                       "NAME  something"
+                       "Hostname")))
+    (dolist (input test-inputs)
+      ;; Bastille
+      (let ((result (tramp-bastille--parse-jail-name input)))
+        (should (or (null result) (stringp result))))
+      ;; Docker
+      (let ((result (pbt--parse-docker-container-name input)))
+        (should (or (null result) (stringp result))))
+      ;; Kubectl
+      (let ((result (pbt--parse-kubectl-pod-name input)))
+        (should (or (null result) (stringp result)))))))
+
 (provide 'tramp-bastille-test)
 ;;; tramp-bastille-test.el ends here

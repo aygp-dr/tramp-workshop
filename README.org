@@ -691,6 +691,76 @@ M-x jail-shell -> agent-bravo
 | Debug output | =(setq tramp-verbose 6)= then check =*Messages*= |
 | Stale connections | =M-x tramp-cleanup-connection= for specific host |
 
+* Part 8: Local vs Cloud Agent Sandboxes
+
+** The Spectrum of Agent Isolation
+
+AI coding agents need isolated environments. This workshop focuses on local
+FreeBSD jails, but cloud-based sandboxes offer an alternative for teams
+without on-prem infrastructure.
+
+| Approach | Example | Access Method | Best For |
+|----------+---------+---------------+----------|
+| Local jails | FreeBSD Bastille | =/bastille:jail:/= | On-prem, low latency, full control |
+| Local containers | Docker, Podman | =/docker:container:/= | Cross-platform local dev |
+| Cloud containers | Cloudflare Sandboxes | HTTP API + WebSocket PTY | Scale-to-zero, global distribution |
+| Managed K8s | EKS, GKE | =/kubernetes:pod:/= | Enterprise, existing K8s infra |
+
+** Cloudflare Sandboxes (Cloud Alternative)
+
+[[https://blog.cloudflare.com/sandbox-ga/][Cloudflare Sandboxes]] (GA 2026-04-13) provide persistent, isolated containers
+for AI agent workloads in the cloud:
+
+#+begin_src typescript
+import { getSandbox } from "@cloudflare/sandbox";
+
+const sandbox = getSandbox(env.Sandbox, "agent-session-47");
+await sandbox.gitCheckout("https://github.com/org/repo", { targetDir: "/workspace" });
+return sandbox.exec("npm", ["test"], { stream: true });
+#+end_src
+
+Key capabilities shared with Bastille jails:
+
+| Capability | Bastille Jail | CF Sandbox |
+|------------+---------------+------------|
+| Isolated filesystem | ZFS dataset | Container overlay |
+| Network isolation | pf firewall + VNET | Egress proxy |
+| Credential injection | Per-jail =.netrc=, =.gh= | Programmable egress proxy |
+| Terminal access | =bastille console= | WebSocket PTY |
+| Snapshot/rollback | =zfs snapshot= | R2-backed snapshots |
+| Idle optimization | Manual stop/start | Auto-sleep/wake |
+
+** When to Use Which
+
+*Choose Bastille jails (this workshop) when:*
+- You have FreeBSD infrastructure
+- Low latency matters (on-prem)
+- You need ZFS-level snapshot granularity
+- Compliance requires data locality
+
+*Choose Cloudflare Sandboxes when:*
+- You need global distribution
+- Scale-to-zero pricing matters
+- No on-prem infrastructure
+- Using Cloudflare Workers ecosystem
+
+** Hybrid Approach
+
+Some teams use both: local jails for development/testing, cloud sandboxes
+for production agent workloads. The TRAMP patterns in this workshop apply
+to both -- the operator's Emacs workflow remains the same, only the
+=tramp-default-proxies-alist= changes.
+
+#+begin_src emacs-lisp :eval no
+;; Development: route to local jail
+(add-to-list 'tramp-default-proxies-alist
+             '("agent-dev-.*" nil "/ssh:operator@sandbox:"))
+
+;; Production: route to bastion with kubectl access
+(add-to-list 'tramp-default-proxies-alist
+             '("agent-prod-.*" nil "/ssh:admin@k8s-bastion:"))
+#+end_src
+
 * References
 
 - [[https://git.savannah.gnu.org/git/tramp.git][TRAMP source (Savannah)]]
@@ -699,3 +769,5 @@ M-x jail-shell -> agent-bravo
 - [[https://github.com/BastilleBSD/bastille][BastilleBSD]]
 - [[https://github.com/steveyegge/beads][Beads Issue Tracker]]
 - [[https://wal.sh/research/2026-agent-isolation-freebsd-jails.html][Agent Isolation with FreeBSD Jails (companion paper)]]
+- [[https://blog.cloudflare.com/sandbox-ga/][Cloudflare Sandboxes GA Announcement]]
+- [[https://developers.cloudflare.com/containers/][Cloudflare Containers Documentation]]
