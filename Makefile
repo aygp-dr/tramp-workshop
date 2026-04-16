@@ -1,4 +1,4 @@
-.PHONY: lint test test-pbt test-all clean
+.PHONY: lint test test-pbt test-pty test-all clean
 
 EMACS ?= emacs
 
@@ -31,8 +31,16 @@ test-pbt:
 		-l tramp-bastille-test.el \
 		-f ert-run-tests-batch-and-exit
 
+# PTY/terminal tests (requires running jails)
+test-pty:
+	$(EMACS) -Q --batch \
+		-L . \
+		-l ert \
+		-l tramp-pty-test.el \
+		-f ert-run-tests-batch-and-exit
+
 # Run all tests
-test-all: test test-pbt
+test-all: test test-pbt test-pty
 
 clean:
 	rm -f *.elc
